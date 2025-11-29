@@ -1,0 +1,5 @@
+{
+  "name": "ArchMass",
+  "description": "A 3D architectural massing and schematic diagram tool using React Three Fiber.",
+  "requestFramePermissions": []
+}
