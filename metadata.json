@@ -1,5 +1,5 @@
 {
-  "name": "ArchMass",
+  "name": "ArchMass+Sunpath Diagram",
   "description": "A 3D architectural massing and schematic diagram tool using React Three Fiber.",
   "requestFramePermissions": []
 }

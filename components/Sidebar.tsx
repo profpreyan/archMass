@@ -1,23 +1,45 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useStore } from '../store';
+import { getDateFromDayOfYear, getSunPosition, toDeg, toRad } from '../utils/solar';
+import { ShapeData } from '../types';
 import { 
-  Layers, Box, Settings, Eye, EyeOff, Lock, Unlock,
+  Layers, Box, Settings, Eye, EyeOff, Lock, Unlock, Sun, ChevronDown, ChevronRight,
   type LucideIcon,
 } from 'lucide-react';
 
-// Design System Components
-interface PanelHeaderProps {
+// --- COLLAPSIBLE SECTION COMPONENT ---
+interface CollapsibleSectionProps {
   title: string;
   icon: LucideIcon;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
 }
 
-const PanelHeader: React.FC<PanelHeaderProps> = ({ title, icon: Icon }) => (
-  <div className="flex items-center gap-2 px-4 py-3 bg-slate-50 border-b border-slate-200">
-    <Icon size={14} className="text-slate-500" />
-    <span className="text-xs font-bold uppercase tracking-wider text-slate-700">{title}</span>
-  </div>
-);
+const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({ title, icon: Icon, defaultOpen = true, children }) => {
+  const [isOpen, setIsOpen] = useState(defaultOpen);
+
+  return (
+    <div className="flex-none border-b border-slate-200">
+      <button 
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full flex items-center justify-between px-4 py-3 bg-slate-50 hover:bg-slate-100 transition-colors"
+      >
+        <div className="flex items-center gap-2">
+          <Icon size={14} className="text-slate-500" />
+          <span className="text-xs font-bold uppercase tracking-wider text-slate-700">{title}</span>
+        </div>
+        {isOpen ? <ChevronDown size={14} className="text-slate-400" /> : <ChevronRight size={14} className="text-slate-400" />}
+      </button>
+      
+      {isOpen && (
+        <div className="py-1">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+};
 
 interface PropertyRowProps {
   label: string;
@@ -36,7 +58,7 @@ const PropertyRow: React.FC<PropertyRowProps> = ({ label, children }) => (
 interface NumberInputProps {
   value: number;
   onChange: (v: number) => void;
-  onSnapshot: () => void;
+  onSnapshot?: () => void;
   label?: string;
   step?: string;
 }
@@ -45,7 +67,6 @@ const NumberInput: React.FC<NumberInputProps> = ({ value, onChange, onSnapshot, 
   const [strVal, setStrVal] = useState(Number(value).toFixed(2));
   const [isFocused, setIsFocused] = useState(false);
 
-  // Sync with prop value only when not focused to avoid overwriting user typing
   useEffect(() => {
     if (!isFocused) {
       setStrVal(Number(value).toFixed(2));
@@ -62,25 +83,24 @@ const NumberInput: React.FC<NumberInputProps> = ({ value, onChange, onSnapshot, 
 
   const handleBlur = () => {
     setIsFocused(false);
-    // On blur, format to ensure consistency
     const num = parseFloat(strVal);
     if (!isNaN(num)) {
       setStrVal(num.toFixed(2));
     } else {
-      setStrVal(Number(value).toFixed(2)); // Revert if invalid
+      setStrVal(Number(value).toFixed(2));
     }
   };
 
   const handleFocus = () => {
     setIsFocused(true);
-    onSnapshot();
+    if (onSnapshot) onSnapshot();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
       (e.target as HTMLInputElement).blur();
     }
-    e.stopPropagation(); // Stop event bubbling to prevent OrbitControls/App listeners from interfering
+    e.stopPropagation(); 
   };
 
   return (
@@ -121,7 +141,7 @@ const ColorInput: React.FC<ColorInputProps> = ({ value, onChange, onSnapshot }) 
   };
   
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    e.stopPropagation(); // Allow typing in color input
+    e.stopPropagation(); 
   };
 
   return (
@@ -153,9 +173,113 @@ const ColorInput: React.FC<ColorInputProps> = ({ value, onChange, onSnapshot }) 
   );
 };
 
+// --- RECURSIVE LAYER ITEM ---
+interface LayerItemProps {
+  shape: ShapeData;
+  depth?: number;
+}
+
+const LayerItem: React.FC<LayerItemProps> = ({ shape, depth = 0 }) => {
+  const { selectedIds, selectShape, toggleShapeVisibility, toggleShapeLock, shapes, updateShape, toggleGroupCollapse, snapshot } = useStore();
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [nameVal, setNameVal] = useState(shape.name);
+
+  const isSelected = selectedIds.includes(shape.id);
+  const isGroup = shape.type === 'group';
+  const children = shapes.filter(s => s.parentId === shape.id);
+  
+  const handleRename = () => {
+     if (nameVal.trim() !== "") {
+        snapshot();
+        updateShape(shape.id, { name: nameVal });
+     } else {
+        setNameVal(shape.name);
+     }
+     setIsRenaming(false);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+     if (e.key === 'Enter') handleRename();
+     if (e.key === 'Escape') {
+         setNameVal(shape.name);
+         setIsRenaming(false);
+     }
+     e.stopPropagation();
+  };
+
+  return (
+    <>
+      <div 
+        onClick={(e) => {
+           e.stopPropagation();
+           selectShape(shape.id, e.ctrlKey || e.metaKey || e.shiftKey);
+        }}
+        className={`group flex items-center gap-2 pr-3 py-1.5 text-xs cursor-pointer select-none transition-colors border-l-2 ${isSelected ? 'bg-blue-50 text-blue-700 font-medium border-blue-500' : 'text-slate-600 hover:bg-slate-50 border-transparent'}`}
+        style={{ paddingLeft: `${depth * 16 + 12}px` }}
+      >
+        {/* Expand/Collapse for Groups */}
+        {isGroup ? (
+           <button 
+             onClick={(e) => { e.stopPropagation(); toggleGroupCollapse(shape.id); }}
+             className="p-0.5 text-slate-400 hover:text-slate-600"
+           >
+             {shape.collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+           </button>
+        ) : (
+           <div className="w-4" /> 
+        )}
+
+        {/* Renaming Input or Name Label */}
+        {isRenaming ? (
+           <input 
+             type="text" 
+             value={nameVal}
+             autoFocus
+             onChange={(e) => setNameVal(e.target.value)}
+             onBlur={handleRename}
+             onKeyDown={handleKeyDown}
+             onClick={(e) => e.stopPropagation()}
+             className="flex-1 min-w-0 bg-white border border-blue-300 rounded px-1 outline-none text-xs"
+           />
+        ) : (
+           <span 
+             onDoubleClick={(e) => { e.stopPropagation(); setIsRenaming(true); }}
+             className={`flex-1 truncate ${shape.locked ? 'opacity-70 italic' : ''}`}
+           >
+             {shape.name}
+           </span>
+        )}
+
+        <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity gap-1">
+           <button 
+             onClick={(e) => { e.stopPropagation(); toggleShapeLock(shape.id); }}
+             className={`p-0.5 rounded ${!shape.locked ? 'text-slate-300 hover:text-slate-500' : 'text-orange-400 opacity-100'}`}
+             title={shape.locked ? "Unlock" : "Lock"}
+           >
+             {shape.locked ? <Lock size={12} /> : <Unlock size={12} />}
+           </button>
+           
+           <button 
+             onClick={(e) => { e.stopPropagation(); toggleShapeVisibility(shape.id); }}
+             className={`p-0.5 rounded ${shape.visible ? 'text-slate-400 hover:text-slate-600' : 'text-slate-300'}`}
+             title={shape.visible ? "Hide" : "Show"}
+           >
+             {shape.visible ? <Eye size={12} /> : <EyeOff size={12} />}
+           </button>
+        </div>
+      </div>
+
+      {/* Render Children Recursively */}
+      {isGroup && !shape.collapsed && children.map(child => (
+         <LayerItem key={child.id} shape={child} depth={depth + 1} />
+      ))}
+    </>
+  );
+};
+
 export const Sidebar: React.FC = () => {
   const { 
-    shapes, selectedId, selectShape, updateShape, toggleShapeVisibility, toggleShapeLock,
+    shapes, selectedIds, updateShape,
     backgroundColor, setBackgroundColor,
     snapGrid, setSnapGrid,
     gridVisible, setGridVisible,
@@ -163,10 +287,12 @@ export const Sidebar: React.FC = () => {
     gridColor, setGridColor,
     gridSectionColor, setGridSectionColor,
     objectSnapEnabled, toggleObjectSnap,
-    snapshot // Get snapshot action
+    sunSettings, setSunSettings,
+    snapshot
   } = useStore();
 
-  const selectedShape = shapes.find(s => s.id === selectedId);
+  const selectedShape = selectedIds.length === 1 ? shapes.find(s => s.id === selectedIds[0]) : null;
+  const isMultiSelect = selectedIds.length > 1;
 
   // Helper for Dimensions (Scale)
   const handleDimensionChange = (axis: number, value: number) => {
@@ -176,7 +302,6 @@ export const Sidebar: React.FC = () => {
     updateShape(selectedShape.id, { scale: newScale });
   };
   
-  // Helper for Rotation (Degrees <-> Radians)
   const toDegrees = (rad: number) => (rad * 180) / Math.PI;
   const toRadians = (deg: number) => (deg * Math.PI) / 180;
 
@@ -187,13 +312,42 @@ export const Sidebar: React.FC = () => {
     updateShape(selectedShape.id, { rotation: newRot });
   };
 
+  // --- SOLAR DATA CALCULATION ---
+  const solarData = useMemo(() => {
+    if (!sunSettings.enabled) return null;
+    const tzOffset = Math.round(sunSettings.longitude / 15);
+    const utcTime = sunSettings.time - tzOffset;
+    const pos = getSunPosition(sunSettings.latitude, sunSettings.longitude, sunSettings.date, utcTime);
+    
+    const latRad = toRad(sunSettings.latitude);
+    const decRad = toRad(pos.declination);
+    const cosW = -Math.tan(latRad) * Math.tan(decRad);
+    let sunsetHour = 12, sunriseHour = 6, dayLength = 12;
+
+    if (Math.abs(cosW) <= 1) {
+       const wRad = Math.acos(cosW);
+       const wDeg = toDeg(wRad);
+       const hours = wDeg / 15;
+       sunsetHour = 12 + hours;
+       sunriseHour = 12 - hours;
+       dayLength = 2 * hours;
+    }
+    
+    return {
+      alt: toDeg(pos.altitude).toFixed(1),
+      az: toDeg(pos.azimuth).toFixed(1),
+      tzString: `UTC${tzOffset >= 0 ? '+' : ''}${tzOffset}`,
+      sunrise: `${Math.floor(sunriseHour)}:${Math.round((sunriseHour%1)*60).toString().padStart(2,'0')}`,
+      sunset: `${Math.floor(sunsetHour)}:${Math.round((sunsetHour%1)*60).toString().padStart(2,'0')}`,
+      dayLength: dayLength.toFixed(1)
+    };
+  }, [sunSettings]);
+
   return (
-    <div className="absolute top-4 right-4 bottom-4 w-64 bg-white/95 backdrop-blur-xl rounded-lg shadow-xl border border-slate-200/60 overflow-hidden flex flex-col z-20 transition-all">
+    <div className="absolute top-4 right-4 bottom-4 w-64 bg-white/95 backdrop-blur-xl rounded-lg shadow-xl border border-slate-200/60 overflow-hidden flex flex-col z-20 transition-all custom-scrollbar">
       
       {/* --- SCENE SETTINGS --- */}
-      <div className="flex-none border-b border-slate-200">
-        <PanelHeader title="Scene" icon={Settings} />
-        <div className="py-1">
+      <CollapsibleSection title="Scene" icon={Settings}>
           <PropertyRow label="Background">
             <ColorInput value={backgroundColor} onChange={setBackgroundColor} onSnapshot={()=>{}} />
           </PropertyRow>
@@ -221,13 +375,105 @@ export const Sidebar: React.FC = () => {
           <PropertyRow label="Object Snap">
              <input type="checkbox" checked={objectSnapEnabled} onChange={toggleObjectSnap} className="accent-blue-600 h-3.5 w-3.5" />
           </PropertyRow>
-        </div>
-      </div>
+      </CollapsibleSection>
+
+       {/* --- ENVIRONMENT / SUN --- */}
+       <CollapsibleSection title="Environment" icon={Sun} defaultOpen={false}>
+          <PropertyRow label="Enable Sun">
+             <input type="checkbox" checked={sunSettings.enabled} onChange={(e) => setSunSettings({ enabled: e.target.checked })} className="accent-blue-600 h-3.5 w-3.5" />
+          </PropertyRow>
+          
+          {sunSettings.enabled && (
+            <>
+              <PropertyRow label="Show Path">
+                <input type="checkbox" checked={sunSettings.showPath} onChange={(e) => setSunSettings({ showPath: e.target.checked })} className="accent-blue-600 h-3.5 w-3.5" />
+              </PropertyRow>
+              <PropertyRow label="Diagram Scale">
+                <div className="flex items-center gap-2 w-full justify-end">
+                  <input type="range" min="10" max="100" step="5" value={sunSettings.radius} onChange={(e) => setSunSettings({ radius: parseInt(e.target.value) })} className="w-16 h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600" />
+                </div>
+              </PropertyRow>
+              
+              <div className="h-[1px] bg-slate-100 my-2 mx-4" />
+
+              <PropertyRow label="Sun Color">
+                 <ColorInput value={sunSettings.sunColor} onChange={(c) => setSunSettings({ sunColor: c })} onSnapshot={()=>{}} />
+              </PropertyRow>
+              <PropertyRow label="Path Color">
+                 <ColorInput value={sunSettings.pathColor} onChange={(c) => setSunSettings({ pathColor: c })} onSnapshot={()=>{}} />
+              </PropertyRow>
+              <PropertyRow label="Shadow Color">
+                 <ColorInput value={sunSettings.shadowColor} onChange={(c) => setSunSettings({ shadowColor: c })} onSnapshot={()=>{}} />
+              </PropertyRow>
+              
+              <div className="h-[1px] bg-slate-100 my-2 mx-4" />
+
+              <PropertyRow label="Latitude">
+                <NumberInput value={sunSettings.latitude} step="0.01" onChange={(v) => setSunSettings({ latitude: v })} />
+              </PropertyRow>
+              <PropertyRow label="Longitude">
+                <NumberInput value={sunSettings.longitude} step="0.01" onChange={(v) => setSunSettings({ longitude: v })} />
+              </PropertyRow>
+              
+              {/* Date Slider */}
+              <div className="px-4 py-2">
+                 <div className="flex justify-between items-center mb-1">
+                    <span className="text-[10px] font-medium text-slate-500">Date</span>
+                    <span className="text-[10px] font-bold text-slate-700">
+                       {getDateFromDayOfYear(sunSettings.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                    </span>
+                 </div>
+                 <input 
+                   type="range" min="1" max="365" step="1"
+                   value={sunSettings.date}
+                   onChange={(e) => setSunSettings({ date: parseInt(e.target.value) })}
+                   className="w-full h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-500" 
+                 />
+              </div>
+
+               {/* Time Slider */}
+               <div className="px-4 py-2 pb-3">
+                 <div className="flex justify-between items-center mb-1">
+                    <span className="text-[10px] font-medium text-slate-500">Local Time</span>
+                    <span className="text-[10px] font-bold text-slate-700">
+                        {Math.floor(sunSettings.time)}:{(Math.round((sunSettings.time % 1) * 60)).toString().padStart(2, '0')}
+                        {solarData && <span className="text-slate-400 font-normal ml-1">({solarData.tzString})</span>}
+                    </span>
+                 </div>
+                 <input 
+                   type="range" min="0" max="24" step="0.25" 
+                   value={sunSettings.time}
+                   onChange={(e) => setSunSettings({ time: parseFloat(e.target.value) })}
+                   className="w-full h-1 bg-gradient-to-r from-slate-900 via-orange-300 to-slate-900 rounded-lg appearance-none cursor-pointer accent-orange-500" 
+                 />
+              </div>
+
+              {/* --- SOLAR ANALYSIS - FLATTENED --- */}
+              {solarData && (
+                <div className="pt-2 mt-2 border-t border-slate-100">
+                   <PropertyRow label="Azimuth">
+                      <span className="text-xs font-mono font-semibold text-slate-700">{solarData.az}°</span>
+                   </PropertyRow>
+                   <PropertyRow label="Altitude">
+                      <span className="text-xs font-mono font-semibold text-slate-700">{solarData.alt}°</span>
+                   </PropertyRow>
+                   <PropertyRow label="Sunrise">
+                      <span className="text-xs font-semibold text-slate-700">{solarData.sunrise}</span>
+                   </PropertyRow>
+                   <PropertyRow label="Sunset">
+                      <span className="text-xs font-semibold text-slate-700">{solarData.sunset}</span>
+                   </PropertyRow>
+                   <PropertyRow label="Day Length">
+                      <span className="text-xs font-semibold text-slate-700">{solarData.dayLength}h</span>
+                   </PropertyRow>
+                </div>
+              )}
+            </>
+          )}
+      </CollapsibleSection>
 
       {/* --- SELECTED OBJECT PROPERTIES --- */}
-      <div className="flex-1 overflow-y-auto custom-scrollbar border-b border-slate-200">
-        <PanelHeader title="Properties" icon={Box} />
-        
+      <CollapsibleSection title="Properties" icon={Box}>
         {selectedShape ? (
           <div className={`py-2 ${selectedShape.locked ? 'opacity-50 pointer-events-none' : ''}`}>
             {/* Name Input */}
@@ -236,7 +482,7 @@ export const Sidebar: React.FC = () => {
                 type="text" 
                 value={selectedShape.name}
                 onFocus={snapshot}
-                onKeyDown={(e) => e.stopPropagation()} // Stop propagation
+                onKeyDown={(e) => e.stopPropagation()} 
                 onChange={(e) => updateShape(selectedShape.id, { name: e.target.value })}
                 className="w-full text-sm font-semibold text-slate-800 bg-transparent border-b border-dashed border-slate-300 focus:border-blue-500 outline-none pb-1 placeholder-slate-400"
                 placeholder="Object Name"
@@ -321,7 +567,7 @@ export const Sidebar: React.FC = () => {
                   <input 
                     type="range" min="0" max="1" step="0.1" 
                     value={selectedShape.opacity}
-                    onPointerDown={snapshot} // Snapshot on drag start
+                    onPointerDown={snapshot} 
                     onChange={(e) => updateShape(selectedShape.id, { opacity: parseFloat(e.target.value) })}
                     className="w-16 h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600" 
                   />
@@ -343,57 +589,40 @@ export const Sidebar: React.FC = () => {
                 </PropertyRow>
               )}
             </div>
-
           </div>
         ) : (
-          <div className="h-32 flex flex-col items-center justify-center text-slate-400 text-xs">
-            <Box size={24} className="mb-2 opacity-20" />
-            <p>No selection</p>
+          <div className="h-24 flex flex-col items-center justify-center text-slate-400 text-xs">
+            {isMultiSelect ? (
+              <>
+                 <Layers size={24} className="mb-2 opacity-20" />
+                 <p>{selectedIds.length} items selected</p>
+              </>
+            ) : (
+              <>
+                <Box size={24} className="mb-2 opacity-20" />
+                <p>No selection</p>
+              </>
+            )}
           </div>
         )}
-      </div>
+      </CollapsibleSection>
 
       {/* --- LAYERS --- */}
-      <div className="flex-1 overflow-y-auto custom-scrollbar flex flex-col min-h-[150px]">
-        <PanelHeader title="Layers" icon={Layers} />
-        <div className="flex-1 p-1">
-          {shapes.length === 0 ? (
-            <p className="text-center text-[10px] text-slate-400 mt-4 italic">Empty scene</p>
-          ) : (
-            <div className="space-y-[1px]">
-              {shapes.map(shape => (
-                <div 
-                  key={shape.id}
-                  onClick={() => selectShape(shape.id)}
-                  className={`group flex items-center gap-2 px-3 py-1.5 rounded text-xs cursor-pointer select-none transition-colors ${selectedId === shape.id ? 'bg-blue-50 text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-50'}`}
-                >
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); toggleShapeVisibility(shape.id); }}
-                    className={`p-0.5 rounded ${shape.visible ? 'text-slate-400 hover:text-slate-600' : 'text-slate-300'}`}
-                    title={shape.visible ? "Hide" : "Show"}
-                  >
-                    {shape.visible ? <Eye size={12} /> : <EyeOff size={12} />}
-                  </button>
-
-                   <button 
-                    onClick={(e) => { e.stopPropagation(); toggleShapeLock(shape.id); }}
-                    className={`p-0.5 rounded ${!shape.locked ? 'text-slate-300 hover:text-slate-500' : 'text-orange-400'}`}
-                    title={shape.locked ? "Unlock" : "Lock"}
-                  >
-                    {shape.locked ? <Lock size={12} /> : <Unlock size={12} />}
-                  </button>
-                  
-                  <span className={`flex-1 truncate ${shape.locked ? 'opacity-70 italic' : ''}`}>{shape.name}</span>
-                  
-                  {/* Indicator for type */}
-                  <span className="text-[9px] uppercase text-slate-300 font-bold tracking-tighter opacity-0 group-hover:opacity-100 transition-opacity">
-                    {shape.type.slice(0,3)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+      <div className="flex-1 overflow-y-auto custom-scrollbar flex flex-col min-h-0">
+        <CollapsibleSection title="Layers" icon={Layers}>
+          <div className="p-1">
+            {shapes.length === 0 ? (
+              <p className="text-center text-[10px] text-slate-400 mt-4 italic">Empty scene</p>
+            ) : (
+              <div className="space-y-[1px]">
+                {/* Only render top-level items here; recursion handles the rest */}
+                {shapes.filter(s => !s.parentId).map(shape => (
+                  <LayerItem key={shape.id} shape={shape} />
+                ))}
+              </div>
+            )}
+          </div>
+        </CollapsibleSection>
       </div>
 
     </div>
